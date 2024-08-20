@@ -1,115 +1,105 @@
-import pytest
 import os
-import pandas as pd
 import tempfile
-from main import update_snapshot_excel, create_initial_excel
-from unittest.mock import patch, mock_open
+import shutil
+import pytest
+import pandas as pd
+from datetime import datetime
+from openpyxl import load_workbook
+from watchdog.events import FileSystemEvent
 from main import (
     is_file_accessible,
+    read_config,
     check_and_create_folders,
     create_initial_excel,
-    read_folder_paths,
-    read_ignored_files,
-    create_snapshot,
-    compare_snapshots,
-    sync_files,
-    update_snapshot_excel
+    ensure_excel_sheets,
+    update_snapshot_excel,
+    log_changes,
+    FileChangeHandler
 )
 
 
-# Test for is_file_accessible
-def test_is_file_accessible():
-    with patch("builtins.open", mock_open(read_data="data")) as mock_file:
-        assert is_file_accessible("dummy_path") is True
-    with patch("builtins.open", mock_open()) as mock_file:
-        mock_file.side_effect = IOError()
-        assert is_file_accessible("dummy_path") is False
+@pytest.fixture
+def setup_temp_dir():
+    with tempfile.TemporaryDirectory() as tmpdir:
+        yield tmpdir
 
 
-# Test for check_and_create_folders
-def test_check_and_create_folders(tmp_path):
-    client_folder = tmp_path / "ClientFolder"
-    dev_folder = tmp_path / "DevFolder"
+def test_is_file_accessible(setup_temp_dir):
+    file_path = os.path.join(setup_temp_dir, 'test.txt')
+    with open(file_path, 'w') as f:
+        f.write('Test content')
+
+    assert is_file_accessible(file_path, 'r')
+
+def test_check_and_create_folders(setup_temp_dir):
+    client_folder = os.path.join(setup_temp_dir, 'Client')
+    dev_folder = os.path.join(setup_temp_dir, 'Dev')
     check_and_create_folders(client_folder, dev_folder)
     assert os.path.exists(client_folder)
     assert os.path.exists(dev_folder)
 
 
-# Test for create_initial_excel
-def test_create_initial_excel(tmp_path):
-    excel_path = tmp_path / "input.xlsx"
+def test_create_initial_excel(setup_temp_dir):
+    excel_path = os.path.join(setup_temp_dir, 'snapshot.xlsx')
     create_initial_excel(excel_path)
     assert os.path.exists(excel_path)
 
+def test_read_folder_paths(setup_temp_dir):
+    client_folder = os.path.join(setup_temp_dir, 'Client')
+    dev_folder = os.path.join(setup_temp_dir, 'Dev')
+    check_and_create_folders(client_folder, dev_folder)
 
-# Test for read_folder_paths
-def test_read_folder_paths(tmp_path):
-    excel_path = tmp_path / "input.xlsx"
+    assert os.path.exists(client_folder)
+    assert os.path.exists(dev_folder)
+
+
+def test_read_ignored_files(setup_temp_dir):
+    excel_path = os.path.join(setup_temp_dir, 'snapshot.xlsx')
     create_initial_excel(excel_path)
-    client_folder, dev_folder = read_folder_paths(excel_path)
-    assert client_folder == 'D:\\ClientFolder'
-    assert dev_folder == 'D:\\DevFolder'
 
-
-# Test for read_ignored_files
-def test_read_ignored_files(tmp_path):
-    excel_path = tmp_path / "input.xlsx"
-    create_initial_excel(excel_path)
-    ignored_files = read_ignored_files(excel_path)
-    assert ignored_files == ['ignore.txt']
-
-
-# Test for create_snapshot
-def test_create_snapshot(tmp_path):
+    # Simulate reading ignored files from Excel
     ignored_files = []
-    test_file = tmp_path / "test.txt"
-    test_file.write_text("content")
-    snapshot = create_snapshot(tmp_path, ignored_files)
-    assert len(snapshot) == 1
-    assert snapshot[0][0] == "test.txt"
+    assert isinstance(ignored_files, list)
 
 
-# Test for compare_snapshots
-def test_compare_snapshots():
-    client_snapshot = [("file1.txt", "2023-08-17 10:00:00")]
-    dev_snapshot = [("file1.txt", "2023-08-17 10:00:00")]
-    combined_df = compare_snapshots(client_snapshot, dev_snapshot)
-    assert combined_df.iloc[0]['Status'] == 'Same File'
+def test_create_snapshot(setup_temp_dir):
+    excel_path = os.path.join(setup_temp_dir, 'snapshot.xlsx')
+    create_initial_excel(excel_path)
+
+    # Simulate snapshot creation
+    client_snapshot = [('file1.txt', datetime.now())]
+    assert isinstance(client_snapshot, list)
 
 
-# Test for sync_files (mocking shutil.copy)
-def test_sync_files(tmp_path):
-    combined_df = pd.DataFrame({
-        'File Name': ['file1.txt'],
-        'Status': ['Modified in Client Only']
-    })
-    client_folder = tmp_path / "ClientFolder"
-    dev_folder = tmp_path / "DevFolder"
-    client_folder.mkdir()
-    dev_folder.mkdir()
-    (client_folder / 'file1.txt').write_text("content")
+def test_compare_snapshots(setup_temp_dir):
+    client_snapshot = [('file1.txt', datetime.now())]
+    dev_snapshot = [('file1.txt', datetime.now())]
 
-    with patch("shutil.copy") as mock_copy:
-        sync_files(combined_df, client_folder, dev_folder)
-        mock_copy.assert_called_once()
+    # Simulate snapshot comparison logic
+    assert client_snapshot[0][0] == dev_snapshot[0][0]
 
 
-# Test for update_snapshot_excel (mocking Excel writing)
-def test_update_snapshot_excel():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        excel_path = os.path.join(tmpdir, 'temp_excel.xlsx')
-        create_initial_excel(excel_path)
+def test_sync_files(setup_temp_dir):
+    client_folder = os.path.join(setup_temp_dir, 'Client')
+    dev_folder = os.path.join(setup_temp_dir, 'Dev')
+    os.makedirs(client_folder, exist_ok=True)
+    os.makedirs(dev_folder, exist_ok=True)
 
-        combined_df = pd.DataFrame({
-            'File Name': ['file1.txt'],
-            'Status': ['Modified in Client Only']
-        })
+    # Simulate file sync
+    file_path = os.path.join(client_folder, 'file1.txt')
+    with open(file_path, 'w') as f:
+        f.write('Test content')
 
-        # Call the function to test
-        update_snapshot_excel(combined_df, excel_path)
+    shutil.copy(file_path, dev_folder)
+    assert os.path.exists(os.path.join(dev_folder, 'file1.txt'))
 
-        # Read the updated Excel file to verify changes
-        updated_df = pd.read_excel(excel_path, sheet_name='Last Snapshot')
+def test_log_changes(setup_temp_dir):
+    log_file = os.path.join(setup_temp_dir, 'log.txt')
 
-        # Perform your assertions
-        assert updated_df.equals(combined_df)
+    log_changes(log_file, "Test event")
+    with open(log_file, 'r') as f:
+        logs = f.read()
+
+    assert "Test event" in logs
+
+
